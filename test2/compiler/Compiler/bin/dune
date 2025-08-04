@@ -1,0 +1,5 @@
+(executable
+ (name main)
+ (modules main)
+ (libraries ToyClib)
+ (flags (:standard -w -32-27-26-39-8)))

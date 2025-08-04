@@ -1,0 +1,7 @@
+(library
+ (name ToyClib)
+ (modules ast lexer parser semantic codegen))
+
+(ocamllex lexer)
+
+(ocamlyacc parser)
