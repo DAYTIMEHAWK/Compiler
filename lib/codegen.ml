@@ -304,7 +304,7 @@ and gen_stmt ctx stmt =
         (ctx, expr_asm ^ move_asm ^ Printf.sprintf "\n    j %s" ctx.func_end_label)
     | EmptyStmt -> (ctx, "")
     | ExprStmt e ->
-        let (ctx, asm, reg) = gen_expr ctx e in
+        let (ctx, asm, _) = gen_expr ctx e in
         (free_temp_reg ctx, asm)
 
 (* 函数代码生成 *)
