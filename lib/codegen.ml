@@ -145,26 +145,79 @@ let rec gen_expr ctx expr =
         let (ctx, reg) = alloc_temp_reg ctx in
         (ctx, Printf.sprintf "\n    lw %s, %d(sp)" reg offset, reg)
     | BinOp (e1, op, e2) ->
-        let (ctx, asm1, reg1) = gen_expr ctx e1 in
-        let (ctx, asm2, reg2) = gen_expr ctx e2 in
-        let reg_dest = reg1 in
-        let instr = match op with
-        | Add -> Printf.sprintf "add %s, %s, %s" reg_dest reg1 reg2
-        | Sub -> Printf.sprintf "sub %s, %s, %s" reg_dest reg1 reg2
-        | Mul -> Printf.sprintf "mul %s, %s, %s" reg_dest reg1 reg2
-        | Div -> Printf.sprintf "div %s, %s, %s" reg_dest reg1 reg2
-        | Mod -> Printf.sprintf "rem %s, %s, %s" reg_dest reg1 reg2
-        | Lt  -> Printf.sprintf "slt %s, %s, %s" reg_dest reg1 reg2
-        | Le  -> Printf.sprintf "sgt %s, %s, %s\n    xori %s, %s, 1" reg_dest reg1 reg2 reg_dest reg_dest
-        | Gt  -> Printf.sprintf "sgt %s, %s, %s" reg_dest reg1 reg2
-        | Ge  -> Printf.sprintf "slt %s, %s, %s\n    xori %s, %s, 1" reg_dest reg1 reg2 reg_dest reg_dest
-        | Eq  -> Printf.sprintf "sub %s, %s, %s\n    seqz %s, %s" reg_dest reg1 reg2 reg_dest reg_dest
-        | Ne  -> Printf.sprintf "sub %s, %s, %s\n    snez %s, %s" reg_dest reg1 reg2 reg_dest reg_dest
-        | And -> Printf.sprintf "and %s, %s, %s" reg_dest reg1 reg2
-        | Or  -> Printf.sprintf "or %s, %s, %s" reg_dest reg1 reg2
-        in
-        let ctx = free_temp_reg ctx in
-        (ctx, asm1 ^ asm2 ^ "\n    " ^ instr, reg_dest)
+        (match op with
+        | And ->
+            (* 实现 a && b 的短路逻辑 *)
+            let (ctx, false_label) = fresh_label ctx "sc_false" in
+            let (ctx, end_label) = fresh_label ctx "sc_end" in
+
+            (* 1. 计算 e1 *)
+            let (ctx, asm1, reg1) = gen_expr ctx e1 in
+            let asm_part1 = asm1 ^ Printf.sprintf "\n    beqz %s, %s" reg1 false_label in
+
+            (* 2. 如果 e1 不为假，才计算 e2 *)
+            let (ctx, asm2, reg2) = gen_expr ctx e2 in
+            (* 最终结果是 e2 的布尔值 *)
+            let asm_part2 = asm2 ^ Printf.sprintf "\n    snez %s, %s" reg1 reg2 in
+
+            let final_asm =
+                asm_part1 ^
+                asm_part2 ^
+                Printf.sprintf "\n    j %s" end_label ^
+                Printf.sprintf "\n%s:" false_label ^
+                (* 如果短路，直接将结果设为 0 *)
+                Printf.sprintf "\n    li %s, 0" reg1 ^
+                Printf.sprintf "\n%s:" end_label
+            in
+            (free_temp_reg ctx, final_asm, reg1)
+
+        | Or ->
+            (* 实现 a || b 的短路逻辑 *)
+            let (ctx, true_label) = fresh_label ctx "sc_true" in
+            let (ctx, end_label) = fresh_label ctx "sc_end" in
+
+            (* 1. 计算 e1 *)
+            let (ctx, asm1, reg1) = gen_expr ctx e1 in
+            let asm_part1 = asm1 ^ Printf.sprintf "\n    bnez %s, %s" reg1 true_label in
+
+            (* 2. 如果 e1 不为真，才计算 e2 *)
+            let (ctx, asm2, reg2) = gen_expr ctx e2 in
+            (* 最终结果是 e2 的布尔值 *)
+            let asm_part2 = asm2 ^ Printf.sprintf "\n    snez %s, %s" reg1 reg2 in
+
+            let final_asm =
+                asm_part1 ^
+                asm_part2 ^
+                Printf.sprintf "\n    j %s" end_label ^
+                Printf.sprintf "\n%s:" true_label ^
+                (* 如果短路，直接将结果设为 1 *)
+                Printf.sprintf "\n    li %s, 1" reg1 ^
+                Printf.sprintf "\n%s:" end_label
+            in
+            (free_temp_reg ctx, final_asm, reg1)
+
+        | _ ->
+            (* 其他二元运算符保持不变 *)
+            let (ctx, asm1, reg1) = gen_expr ctx e1 in
+            let (ctx, asm2, reg2) = gen_expr ctx e2 in
+            let reg_dest = reg1 in
+            let instr = match op with
+            | Add -> Printf.sprintf "add %s, %s, %s" reg_dest reg1 reg2
+            | Sub -> Printf.sprintf "sub %s, %s, %s" reg_dest reg1 reg2
+            | Mul -> Printf.sprintf "mul %s, %s, %s" reg_dest reg1 reg2
+            | Div -> Printf.sprintf "div %s, %s, %s" reg_dest reg1 reg2
+            | Mod -> Printf.sprintf "rem %s, %s, %s" reg_dest reg1 reg2
+            | Lt  -> Printf.sprintf "slt %s, %s, %s" reg_dest reg1 reg2
+            | Le  -> Printf.sprintf "sgt %s, %s, %s\n    xori %s, %s, 1" reg_dest reg1 reg2 reg_dest reg_dest
+            | Gt  -> Printf.sprintf "sgt %s, %s, %s" reg_dest reg1 reg2
+            | Ge  -> Printf.sprintf "slt %s, %s, %s\n    xori %s, %s, 1" reg_dest reg1 reg2 reg_dest reg_dest
+            | Eq  -> Printf.sprintf "sub %s, %s, %s\n    seqz %s, %s" reg_dest reg1 reg2 reg_dest reg_dest
+            | Ne  -> Printf.sprintf "sub %s, %s, %s\n    snez %s, %s" reg_dest reg1 reg2 reg_dest reg_dest
+            | And | Or -> "" (* 已经被上面处理，这里不会到达 *)
+            in
+            let ctx = free_temp_reg ctx in
+            (ctx, asm1 ^ asm2 ^ "\n    " ^ instr, reg_dest)
+        )
     | UnOp (op, e) ->
         let (ctx, asm, reg) = gen_expr ctx e in
         let reg_dest = reg in
