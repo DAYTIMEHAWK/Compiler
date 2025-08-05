@@ -196,11 +196,22 @@ let rec gen_expr ctx expr =
             in
             (free_temp_reg ctx, final_asm, reg1)
 
-        | _ ->
-            (* 其他二元运算符保持不变 *)
+                | _ ->
+            (* 其他二元运算符，使用栈来保护中间结果 *)
+            (* 1. 计算第一个表达式 e1 *)
             let (ctx, asm1, reg1) = gen_expr ctx e1 in
+
+            (* 2. 将 e1 的结果 (在 reg1 中) 推入栈中进行保护 *)
+            let push_asm = Printf.sprintf "\n    addi sp, sp, -4\n    sw %s, 0(sp)" reg1 in
+
+            (* 3. 计算第二个表达式 e2，它现在可以自由使用临时寄存器 *)
             let (ctx, asm2, reg2) = gen_expr ctx e2 in
-            let reg_dest = reg1 in
+
+            (* 4. 从栈中恢复 e1 的结果到 reg1 *)
+            let pop_asm = Printf.sprintf "\n    lw %s, 0(sp)\n    addi sp, sp, 4" reg1 in
+
+            (* 5. 执行最终操作。注意，目标寄存器是 reg2，这样可以少用一个寄存器 *)
+            let reg_dest = reg2 in
             let instr = match op with
             | Add -> Printf.sprintf "add %s, %s, %s" reg_dest reg1 reg2
             | Sub -> Printf.sprintf "sub %s, %s, %s" reg_dest reg1 reg2
@@ -213,11 +224,13 @@ let rec gen_expr ctx expr =
             | Ge  -> Printf.sprintf "slt %s, %s, %s\n    xori %s, %s, 1" reg_dest reg1 reg2 reg_dest reg_dest
             | Eq  -> Printf.sprintf "sub %s, %s, %s\n    seqz %s, %s" reg_dest reg1 reg2 reg_dest reg_dest
             | Ne  -> Printf.sprintf "sub %s, %s, %s\n    snez %s, %s" reg_dest reg1 reg2 reg_dest reg_dest
-            | And | Or -> "" (* 已经被上面处理，这里不会到达 *)
+            | And | Or -> "" (* 不会到达这里 *)
             in
+            
+            (* 我们使用了 reg1 和 reg2 两个寄存器，最终结果保存在 reg_dest (即 reg2) 中。
+               所以 reg1 对应的临时寄存器可以被释放了。 *)
             let ctx = free_temp_reg ctx in
-            (ctx, asm1 ^ asm2 ^ "\n    " ^ instr, reg_dest)
-        )
+            (ctx, asm1 ^ push_asm ^ asm2 ^ pop_asm ^ "\n    " ^ instr, reg_dest)
     | UnOp (op, e) ->
         let (ctx, asm, reg) = gen_expr ctx e in
         let reg_dest = reg in
