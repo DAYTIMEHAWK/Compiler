@@ -242,15 +242,22 @@ and gen_stmt ctx stmt =
         let asm = expr_asm ^ Printf.sprintf "\n    sw %s, %d(sp)" reg offset in
         (free_temp_reg ctx, asm)
     | If (cond, then_stmt, else_stmt) ->
+        (* 1. 编译条件 *)
         let (ctx, cond_asm, cond_reg) = gen_expr ctx cond in
-        let (ctx, else_label) = fresh_label ctx "if_else" in
-        let (ctx, end_label) = fresh_label ctx "if_end" in
-        
-        let (ctx_after_then, then_asm) = gen_stmt ctx then_stmt in
-        
-        let (ctx_final, final_asm) = 
+
+        (* 2. 以链式方式获取两个唯一的标签，确保上下文正确传递 *)
+        let (ctx_after_label1, else_label) = fresh_label ctx "if_else" in
+        let (ctx_after_label2, end_label) = fresh_label ctx_after_label1 "if_end" in
+
+        (* 3. 编译 then 块，传入的是获取完标签后的最新上下文 *)
+        let (ctx_after_then, then_asm) = gen_stmt ctx_after_label2 then_stmt in
+
+        (* 4. 根据是否存在 else 块来生成不同的汇编代码 *)
+        let (ctx_final, final_asm) =
             match else_stmt with
             | Some s ->
+                (* 如果有 else 块 *)
+                (* 编译 else 块，传入的是编译完 then 块后的上下文 *)
                 let (ctx_after_else, else_asm) = gen_stmt ctx_after_then s in
                 let asm = cond_asm ^
                     Printf.sprintf "\n    beqz %s, %s" cond_reg else_label ^
@@ -262,21 +269,31 @@ and gen_stmt ctx stmt =
                 in
                 (ctx_after_else, asm)
             | None ->
+                (* 如果没有 else 块 (if... then...) *)
+                (* else_label 此时就是 end_label *)
                 let asm = cond_asm ^
-                    Printf.sprintf "\n    beqz %s, %s" cond_reg end_label ^
+                    Printf.sprintf "\n    beqz %s, %s" cond_reg else_label ^
                     then_asm ^
-                    Printf.sprintf "\n%s:" end_label
+                    Printf.sprintf "\n%s:" else_label
                 in
                 (ctx_after_then, asm)
         in
+        (* 注意: 在 `if...then...` 的情况下，end_label 没有被使用，但我们仍需生成它以保持计数器正确推进 *)
+        (* 最终返回的上下文是编译完所有分支后的最终上下文 *)
         (free_temp_reg ctx_final, final_asm)
 
     | While (cond, body) ->
-        let (ctx, begin_label) = fresh_label ctx "loop_begin" in
-        let (ctx, end_label) = fresh_label ctx "loop_end" in
-        let loop_ctx = { ctx with loop_stack = (begin_label, end_label) :: ctx.loop_stack } in
-        let (ctx, cond_asm, cond_reg) = gen_expr loop_ctx cond in
-        let (_, body_asm) = gen_stmt loop_ctx body in
+        (* 1. 以链式方式获取循环所需的两个唯一标签 *)
+        let (ctx_after_label1, begin_label) = fresh_label ctx "loop_begin" in
+        let (ctx_after_label2, end_label) = fresh_label ctx_after_label1 "loop_end" in
+
+        (* 2. 创建包含循环标签的上下文，用于编译循环体和条件 *)
+        let loop_ctx = { ctx_after_label2 with loop_stack = (begin_label, end_label) :: ctx.loop_stack } in
+
+        (* 3. 编译条件和循环体，确保传入正确的上下文 *)
+        let (ctx_after_cond, cond_asm, cond_reg) = gen_expr loop_ctx cond in
+        let (ctx_after_body, body_asm) = gen_stmt ctx_after_cond body in
+        
         let asm =
             Printf.sprintf "\n%s:" begin_label ^
             cond_asm ^
@@ -285,7 +302,8 @@ and gen_stmt ctx stmt =
             Printf.sprintf "\n    j %s" begin_label ^
             Printf.sprintf "\n%s:" end_label
         in
-        (free_temp_reg ctx, asm)
+        (* 4. 返回最终的上下文 *)
+        (free_temp_reg ctx_after_body, asm)
     | Break ->
         (match ctx.loop_stack with
         | (_, end_label)::_ -> (ctx, Printf.sprintf "\n    j %s" end_label)
