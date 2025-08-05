@@ -245,25 +245,32 @@ and gen_stmt ctx stmt =
         let (ctx, cond_asm, cond_reg) = gen_expr ctx cond in
         let (ctx, else_label) = fresh_label ctx "if_else" in
         let (ctx, end_label) = fresh_label ctx "if_end" in
-        let (ctx, then_asm) = gen_stmt ctx then_stmt in
-        let final_asm =
+        
+        let (ctx_after_then, then_asm) = gen_stmt ctx then_stmt in
+        
+        let (ctx_final, final_asm) = 
             match else_stmt with
             | Some s ->
-                let (_, else_asm) = gen_stmt ctx s in
-                cond_asm ^
-                Printf.sprintf "\n    beqz %s, %s" cond_reg else_label ^
-                then_asm ^
-                Printf.sprintf "\n    j %s" end_label ^
-                Printf.sprintf "\n%s:" else_label ^
-                else_asm ^
-                Printf.sprintf "\n%s:" end_label
+                let (ctx_after_else, else_asm) = gen_stmt ctx_after_then s in
+                let asm = cond_asm ^
+                    Printf.sprintf "\n    beqz %s, %s" cond_reg else_label ^
+                    then_asm ^
+                    Printf.sprintf "\n    j %s" end_label ^
+                    Printf.sprintf "\n%s:" else_label ^
+                    else_asm ^
+                    Printf.sprintf "\n%s:" end_label
+                in
+                (ctx_after_else, asm)
             | None ->
-                cond_asm ^
-                Printf.sprintf "\n    beqz %s, %s" cond_reg end_label ^
-                then_asm ^
-                Printf.sprintf "\n%s:" end_label
+                let asm = cond_asm ^
+                    Printf.sprintf "\n    beqz %s, %s" cond_reg end_label ^
+                    then_asm ^
+                    Printf.sprintf "\n%s:" end_label
+                in
+                (ctx_after_then, asm)
         in
-        (free_temp_reg ctx, final_asm)
+        ({ ctx_final with temp_regs_used = ctx_final.temp_regs_used - 1 }, final_asm)
+
     | While (cond, body) ->
         let (ctx, begin_label) = fresh_label ctx "loop_begin" in
         let (ctx, end_label) = fresh_label ctx "loop_end" in
