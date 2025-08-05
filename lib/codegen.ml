@@ -269,7 +269,7 @@ and gen_stmt ctx stmt =
                 in
                 (ctx_after_then, asm)
         in
-        ({ ctx_final with temp_regs_used = ctx_final.temp_regs_used - 1 }, final_asm)
+        (free_temp_reg ctx_final, final_asm)
 
     | While (cond, body) ->
         let (ctx, begin_label) = fresh_label ctx "loop_begin" in
