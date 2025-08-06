@@ -140,19 +140,24 @@ let rec gen_expr ctx expr =
     | IntLit n ->
         let (ctx, reg) = alloc_temp_reg ctx in
         (ctx, Printf.sprintf "\n    li %s, %d" reg n, reg)
+
     | Var name ->
         let offset = get_var_offset ctx name in
         let (ctx, reg) = alloc_temp_reg ctx in
         (ctx, Printf.sprintf "\n    lw %s, %d(sp)" reg offset, reg)
+
     | BinOp (e1, op, e2) ->
         (match op with
         | And ->
-            let (ctx, false_label) = fresh_label ctx "sc_false" in
-            let (ctx_after_label, end_label) = fresh_label ctx "sc_end" in
-            let (ctx, asm1, reg1) = gen_expr ctx_after_label e1 in
+            let (ctx1, false_label) = fresh_label ctx "sc_false" in
+            let (ctx2, end_label) = fresh_label ctx1 "sc_end" in
+            
+            let (ctx3, asm1, reg1) = gen_expr ctx2 e1 in
             let asm_part1 = asm1 ^ Printf.sprintf "\n    beqz %s, %s" reg1 false_label in
-            let (ctx, asm2, reg2) = gen_expr ctx e2 in
+            
+            let (ctx4, asm2, reg2) = gen_expr ctx3 e2 in
             let asm_part2 = asm2 ^ Printf.sprintf "\n    snez %s, %s" reg1 reg2 in
+            
             let final_asm =
                 asm_part1 ^
                 asm_part2 ^
@@ -161,14 +166,18 @@ let rec gen_expr ctx expr =
                 Printf.sprintf "\n    li %s, 0" reg1 ^
                 Printf.sprintf "\n%s:" end_label
             in
-            (free_temp_reg ctx, final_asm, reg1)
+            (free_temp_reg ctx4, final_asm, reg1)
+
         | Or ->
-            let (ctx, true_label) = fresh_label ctx "sc_true" in
-            let (ctx_after_label, end_label) = fresh_label ctx "sc_end" in
-            let (ctx, asm1, reg1) = gen_expr ctx_after_label e1 in
+            let (ctx1, true_label) = fresh_label ctx "sc_true" in
+            let (ctx2, end_label) = fresh_label ctx1 "sc_end" in
+            
+            let (ctx3, asm1, reg1) = gen_expr ctx2 e1 in
             let asm_part1 = asm1 ^ Printf.sprintf "\n    bnez %s, %s" reg1 true_label in
-            let (ctx, asm2, reg2) = gen_expr ctx e2 in
+
+            let (ctx4, asm2, reg2) = gen_expr ctx3 e2 in
             let asm_part2 = asm2 ^ Printf.sprintf "\n    snez %s, %s" reg1 reg2 in
+
             let final_asm =
                 asm_part1 ^
                 asm_part2 ^
@@ -177,12 +186,19 @@ let rec gen_expr ctx expr =
                 Printf.sprintf "\n    li %s, 1" reg1 ^
                 Printf.sprintf "\n%s:" end_label
             in
-            (free_temp_reg ctx, final_asm, reg1)
+            (free_temp_reg ctx4, final_asm, reg1)
+
         | _ ->
-            let (ctx, asm1, reg1) = gen_expr ctx e1 in
+            (* 其他二元运算符，使用栈来保护中间结果，并正确传递上下文 *)
+            let (ctx1, asm1, reg1) = gen_expr ctx e1 in
+            
             let push_asm = Printf.sprintf "\n    addi sp, sp, -4\n    sw %s, 0(sp)" reg1 in
-            let (ctx, asm2, reg2) = gen_expr ctx e2 in
+            
+            (* 使用 ctx1 来编译 e2 *)
+            let (ctx2, asm2, reg2) = gen_expr ctx1 e2 in
+            
             let pop_asm = Printf.sprintf "\n    lw %s, 0(sp)\n    addi sp, sp, 4" reg1 in
+            
             let reg_dest = reg2 in
             let instr = match op with
             | Add -> Printf.sprintf "add %s, %s, %s" reg_dest reg1 reg2
@@ -198,9 +214,12 @@ let rec gen_expr ctx expr =
             | Ne  -> Printf.sprintf "sub %s, %s, %s\n    snez %s, %s" reg_dest reg1 reg2 reg_dest reg_dest
             | And | Or -> "" (* Unreachable *)
             in
-            let ctx = free_temp_reg ctx in
-            (ctx, asm1 ^ push_asm ^ asm2 ^ pop_asm ^ "\n    " ^ instr, reg_dest)
+            
+            (* 释放一个寄存器，基于最新的 ctx2 *)
+            let ctx_final = free_temp_reg ctx2 in
+            (ctx_final, asm1 ^ push_asm ^ asm2 ^ pop_asm ^ "\n    " ^ instr, reg_dest)
         )
+
     | UnOp (op, e) ->
         let (ctx, asm, reg) = gen_expr ctx e in
         let reg_dest = reg in
@@ -210,6 +229,7 @@ let rec gen_expr ctx expr =
         | Not    -> Printf.sprintf "\n    seqz %s, %s" reg_dest reg
         in
         (ctx, asm ^ instr, reg_dest)
+
     | FuncCall (name, args) ->
         let (ctx, arg_asm, arg_regs) = gen_args ctx args in
         let n_temps_to_save = ctx.temp_regs_used in
