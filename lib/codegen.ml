@@ -144,19 +144,15 @@ let rec gen_expr ctx expr =
         let offset = get_var_offset ctx name in
         let (ctx, reg) = alloc_temp_reg ctx in
         (ctx, Printf.sprintf "\n    lw %s, %d(sp)" reg offset, reg)
-        | BinOp (e1, op, e2) ->
+    | BinOp (e1, op, e2) ->
         (match op with
         | And ->
-            (* 实现 a && b 的短路逻辑 *)
             let (ctx, false_label) = fresh_label ctx "sc_false" in
-            let (ctx, end_label) = fresh_label ctx "sc_end" in
-
-            let (ctx, asm1, reg1) = gen_expr ctx e1 in
+            let (ctx_after_label, end_label) = fresh_label ctx "sc_end" in
+            let (ctx, asm1, reg1) = gen_expr ctx_after_label e1 in
             let asm_part1 = asm1 ^ Printf.sprintf "\n    beqz %s, %s" reg1 false_label in
-
             let (ctx, asm2, reg2) = gen_expr ctx e2 in
             let asm_part2 = asm2 ^ Printf.sprintf "\n    snez %s, %s" reg1 reg2 in
-
             let final_asm =
                 asm_part1 ^
                 asm_part2 ^
@@ -166,18 +162,13 @@ let rec gen_expr ctx expr =
                 Printf.sprintf "\n%s:" end_label
             in
             (free_temp_reg ctx, final_asm, reg1)
-
         | Or ->
-            (* 实现 a || b 的短路逻辑 *)
             let (ctx, true_label) = fresh_label ctx "sc_true" in
-            let (ctx, end_label) = fresh_label ctx "sc_end" in
-
-            let (ctx, asm1, reg1) = gen_expr ctx e1 in
+            let (ctx_after_label, end_label) = fresh_label ctx "sc_end" in
+            let (ctx, asm1, reg1) = gen_expr ctx_after_label e1 in
             let asm_part1 = asm1 ^ Printf.sprintf "\n    bnez %s, %s" reg1 true_label in
-
             let (ctx, asm2, reg2) = gen_expr ctx e2 in
             let asm_part2 = asm2 ^ Printf.sprintf "\n    snez %s, %s" reg1 reg2 in
-
             let final_asm =
                 asm_part1 ^
                 asm_part2 ^
@@ -187,17 +178,11 @@ let rec gen_expr ctx expr =
                 Printf.sprintf "\n%s:" end_label
             in
             (free_temp_reg ctx, final_asm, reg1)
-
         | _ ->
-            (* 其他二元运算符，使用栈来保护中间结果 *)
             let (ctx, asm1, reg1) = gen_expr ctx e1 in
-
             let push_asm = Printf.sprintf "\n    addi sp, sp, -4\n    sw %s, 0(sp)" reg1 in
-
             let (ctx, asm2, reg2) = gen_expr ctx e2 in
-
             let pop_asm = Printf.sprintf "\n    lw %s, 0(sp)\n    addi sp, sp, 4" reg1 in
-
             let reg_dest = reg2 in
             let instr = match op with
             | Add -> Printf.sprintf "add %s, %s, %s" reg_dest reg1 reg2
@@ -211,72 +196,11 @@ let rec gen_expr ctx expr =
             | Ge  -> Printf.sprintf "slt %s, %s, %s\n    xori %s, %s, 1" reg_dest reg1 reg2 reg_dest reg_dest
             | Eq  -> Printf.sprintf "sub %s, %s, %s\n    seqz %s, %s" reg_dest reg1 reg2 reg_dest reg_dest
             | Ne  -> Printf.sprintf "sub %s, %s, %s\n    snez %s, %s" reg_dest reg1 reg2 reg_dest reg_dest
-            | And | Or -> "" (* This case is unreachable *)
+            | And | Or -> "" (* Unreachable *)
             in
-            
             let ctx = free_temp_reg ctx in
             (ctx, asm1 ^ push_asm ^ asm2 ^ pop_asm ^ "\n    " ^ instr, reg_dest)
         )
-        | Or ->
-            (* 实现 a || b 的短路逻辑 *)
-            let (ctx, true_label) = fresh_label ctx "sc_true" in
-            let (ctx, end_label) = fresh_label ctx "sc_end" in
-
-            (* 1. 计算 e1 *)
-            let (ctx, asm1, reg1) = gen_expr ctx e1 in
-            let asm_part1 = asm1 ^ Printf.sprintf "\n    bnez %s, %s" reg1 true_label in
-
-            (* 2. 如果 e1 不为真，才计算 e2 *)
-            let (ctx, asm2, reg2) = gen_expr ctx e2 in
-            (* 最终结果是 e2 的布尔值 *)
-            let asm_part2 = asm2 ^ Printf.sprintf "\n    snez %s, %s" reg1 reg2 in
-
-            let final_asm =
-                asm_part1 ^
-                asm_part2 ^
-                Printf.sprintf "\n    j %s" end_label ^
-                Printf.sprintf "\n%s:" true_label ^
-                (* 如果短路，直接将结果设为 1 *)
-                Printf.sprintf "\n    li %s, 1" reg1 ^
-                Printf.sprintf "\n%s:" end_label
-            in
-            (free_temp_reg ctx, final_asm, reg1)
-
-                | _ ->
-            (* 其他二元运算符，使用栈来保护中间结果 *)
-            (* 1. 计算第一个表达式 e1 *)
-            let (ctx, asm1, reg1) = gen_expr ctx e1 in
-
-            (* 2. 将 e1 的结果 (在 reg1 中) 推入栈中进行保护 *)
-            let push_asm = Printf.sprintf "\n    addi sp, sp, -4\n    sw %s, 0(sp)" reg1 in
-
-            (* 3. 计算第二个表达式 e2，它现在可以自由使用临时寄存器 *)
-            let (ctx, asm2, reg2) = gen_expr ctx e2 in
-
-            (* 4. 从栈中恢复 e1 的结果到 reg1 *)
-            let pop_asm = Printf.sprintf "\n    lw %s, 0(sp)\n    addi sp, sp, 4" reg1 in
-
-            (* 5. 执行最终操作。注意，目标寄存器是 reg2，这样可以少用一个寄存器 *)
-            let reg_dest = reg2 in
-            let instr = match op with
-            | Add -> Printf.sprintf "add %s, %s, %s" reg_dest reg1 reg2
-            | Sub -> Printf.sprintf "sub %s, %s, %s" reg_dest reg1 reg2
-            | Mul -> Printf.sprintf "mul %s, %s, %s" reg_dest reg1 reg2
-            | Div -> Printf.sprintf "div %s, %s, %s" reg_dest reg1 reg2
-            | Mod -> Printf.sprintf "rem %s, %s, %s" reg_dest reg1 reg2
-            | Lt  -> Printf.sprintf "slt %s, %s, %s" reg_dest reg1 reg2
-            | Le  -> Printf.sprintf "sgt %s, %s, %s\n    xori %s, %s, 1" reg_dest reg1 reg2 reg_dest reg_dest
-            | Gt  -> Printf.sprintf "sgt %s, %s, %s" reg_dest reg1 reg2
-            | Ge  -> Printf.sprintf "slt %s, %s, %s\n    xori %s, %s, 1" reg_dest reg1 reg2 reg_dest reg_dest
-            | Eq  -> Printf.sprintf "sub %s, %s, %s\n    seqz %s, %s" reg_dest reg1 reg2 reg_dest reg_dest
-            | Ne  -> Printf.sprintf "sub %s, %s, %s\n    snez %s, %s" reg_dest reg1 reg2 reg_dest reg_dest
-            | And | Or -> "" (* 不会到达这里 *)
-            in
-            
-            (* 我们使用了 reg1 和 reg2 两个寄存器，最终结果保存在 reg_dest (即 reg2) 中。
-               所以 reg1 对应的临时寄存器可以被释放了。 *)
-            let ctx = free_temp_reg ctx in
-            (ctx, asm1 ^ push_asm ^ asm2 ^ pop_asm ^ "\n    " ^ instr, reg_dest)
     | UnOp (op, e) ->
         let (ctx, asm, reg) = gen_expr ctx e in
         let reg_dest = reg in
@@ -290,33 +214,25 @@ let rec gen_expr ctx expr =
         let (ctx, arg_asm, arg_regs) = gen_args ctx args in
         let n_temps_to_save = ctx.temp_regs_used in
         let save_area_size = n_temps_to_save * 4 in
-
         let save_temps_asm = List.init n_temps_to_save (fun i ->
             Printf.sprintf "\n    sw t%d, %d(sp)" i (i * 4)) |> String.concat ""
         in
         let restore_temps_asm = List.init n_temps_to_save (fun i ->
             Printf.sprintf "\n    lw t%d, %d(sp)" i (i * 4)) |> String.concat ""
         in
-
         let move_args_asm =
             List.mapi (fun i reg ->
-                if i < 8 then
-                    Printf.sprintf "\n    mv a%d, %s" i reg
-                else
-                    Printf.sprintf "\n    sw %s, %d(sp)" reg (save_area_size + (i - 8) * 4)
+                if i < 8 then Printf.sprintf "\n    mv a%d, %s" i reg
+                else Printf.sprintf "\n    sw %s, %d(sp)" reg (save_area_size + (i - 8) * 4)
             ) arg_regs |> String.concat ""
         in
-
         let stack_alloc_size = align_stack (save_area_size + (max 0 (List.length args - 8)) * 4) stack_align in
         let alloc_sp_asm = if stack_alloc_size > 0 then Printf.sprintf "\n    addi sp, sp, -%d" stack_alloc_size else "" in
         let free_sp_asm = if stack_alloc_size > 0 then Printf.sprintf "\n    addi sp, sp, %d" stack_alloc_size else "" in
-
         let call_asm = Printf.sprintf "\n    call %s" name in
         let (ctx, reg_dest) = alloc_temp_reg ctx in
         let move_result_asm = Printf.sprintf "\n    mv %s, a0" reg_dest in
-
         let asm = arg_asm ^ alloc_sp_asm ^ save_temps_asm ^ move_args_asm ^ call_asm ^ restore_temps_asm ^ free_sp_asm ^ move_result_asm in
-
         let ctx = List.fold_left (fun c _ -> free_temp_reg c) ctx arg_regs in
         (ctx, asm, reg_dest)
 
