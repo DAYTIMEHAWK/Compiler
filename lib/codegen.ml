@@ -208,9 +208,9 @@ let rec gen_expr ctx expr =
 
         (* 保存调用者保存寄存器 (t0-t6) 到栈上，只保存实际使用的 *)
         let save_temps_asm =
-          List.mapi (fun i reg_name ->
+          List.mapi (fun i reg_name -> (* 这里的 reg_name 就是 "t0", "t1" 等 *)
             if i < current_temp_regs_state then
-                Printf.sprintf "    sw t%d, %d(sp)\n" i (i * 4)
+                Printf.sprintf "    sw %s, %d(sp)\n" reg_name (i * 4) (* 使用 reg_name *)
             else ""
           ) (List.init 7 (fun i -> Printf.sprintf "t%d" i))
           |> String.concat ""
@@ -241,9 +241,9 @@ let rec gen_expr ctx expr =
 
         (* 恢复调用者保存寄存器 (t0-t6)，只恢复之前保存的 *)
         let restore_temps_asm =
-          List.mapi (fun i reg_name ->
+          List.mapi (fun i reg_name -> (* 这里的 reg_name 就是 "t0", "t1" 等 *)
             if i < current_temp_regs_state then
-                Printf.sprintf "    lw t%d, %d(sp)\n" i (i * 4)
+                Printf.sprintf "    lw %s, %d(sp)\n" reg_name (i * 4) (* 使用 reg_name *)
             else ""
           ) (List.init 7 (fun i -> Printf.sprintf "t%d" i))
           |> String.concat ""
