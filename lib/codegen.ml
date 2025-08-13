@@ -282,65 +282,85 @@ and gen_stmt ctx stmt =
         let new_ctx = { ctx with var_offset = [] :: ctx.var_offset } in
         let (ctx_after, asm) = gen_stmts new_ctx stmts in
         (* 离开作用域：弹出当前作用域 *)
-        let popped_ctx = 
+        let popped_ctx =
             match ctx_after.var_offset with
             | _ :: outer_scopes -> { ctx_after with var_offset = outer_scopes }
             | [] -> failwith "Scope stack underflow"
         in
         (popped_ctx, asm)
-    
+
     | VarDecl (name, expr) ->
         let (ctx, expr_asm, reg) = gen_expr ctx expr in
         let ctx = add_var ctx name 4 in
         let offset = get_var_offset ctx name in
         let asm = expr_asm ^ Printf.sprintf "\n    sw %s, %d(sp)" reg offset in
         (free_temp_reg ctx, asm)
-    
+
     | VarAssign (name, expr) ->
         let offset = get_var_offset ctx name in
         let (ctx, expr_asm, reg) = gen_expr ctx expr in
         let asm = expr_asm ^ Printf.sprintf "\n    sw %s, %d(sp)" reg offset in
         (free_temp_reg ctx, asm)
-    
+
     | If (cond, then_stmt, else_stmt) ->
-        let (ctx, cond_asm, cond_reg) = gen_expr ctx cond in
-        let (ctx, else_label) = fresh_label ctx "if_else" in
-        let (ctx, end_label) = fresh_label ctx "if_end" in
-        
-        let (ctx_then, then_asm) = gen_stmt ctx then_stmt in
-        
-        let final_asm = 
+        (* 1. 生成条件表达式 *)
+        let (ctx_after_cond_expr, cond_asm, cond_reg) = gen_expr ctx cond in
+        (* ctx_after_cond_expr 包含了 cond_reg 的分配 *)
+
+        (* 2. 生成 if-else 结构所需的标签 *)
+        let (ctx_with_else_label, else_label) = fresh_label ctx_after_cond_expr "if_else" in
+        let (ctx_for_branches, end_label) = fresh_label ctx_with_else_label "if_end" in
+        (* ctx_for_branches 是 then 和 else 分支的共同起始上下文 *)
+
+        (* 3. 生成 'then' 分支的代码 *)
+        let (ctx_after_then_branch, then_asm) = gen_stmt ctx_for_branches then_stmt in
+
+        let final_asm, final_label_counter =
             match else_stmt with
             | Some s ->
-                let (ctx_else, else_asm) = gen_stmt ctx_then s in
-                cond_asm ^
-                Printf.sprintf "\n    beqz %s, %s" cond_reg else_label ^
-                then_asm ^
-                Printf.sprintf "\n    j %s" end_label ^
-                Printf.sprintf "\n%s:" else_label ^
-                else_asm ^
-                Printf.sprintf "\n%s:" end_label
+                (* 4. 生成 'else' 分支的代码，同样从 ctx_for_branches 开始 *)
+                let (ctx_after_else_branch, else_asm) = gen_stmt ctx_for_branches s in
+
+                (* 合并上下文：label_counter 应取两个分支中最大的值 *)
+                let max_label_counter = max ctx_after_then_branch.label_counter ctx_after_else_branch.label_counter in
+                (
+                    cond_asm ^
+                    Printf.sprintf "\n    beqz %s, %s" cond_reg else_label ^
+                    then_asm ^
+                    Printf.sprintf "\n    j %s" end_label ^
+                    Printf.sprintf "\n%s:" else_label ^
+                    else_asm ^
+                    Printf.sprintf "\n%s:" end_label,
+                    max_label_counter
+                )
             | None ->
-                cond_asm ^
-                Printf.sprintf "\n    beqz %s, %s" cond_reg end_label ^
-                then_asm ^
-                Printf.sprintf "\n%s:" end_label
+                (* 如果没有 else 分支，则直接使用 then 分支后的 label_counter *)
+                (
+                    cond_asm ^
+                    Printf.sprintf "\n    beqz %s, %s" cond_reg end_label ^
+                    then_asm ^
+                    Printf.sprintf "\n%s:" end_label,
+                    ctx_after_then_branch.label_counter
+                )
         in
-        (free_temp_reg ctx, final_asm)
+        (* 5. 构建最终的上下文：在 ctx_for_branches 的基础上更新 label_counter，并释放条件寄存器 *)
+        let ctx_before_free = { ctx_for_branches with label_counter = final_label_counter } in
+        (free_temp_reg ctx_before_free, final_asm)
 
     | While (cond, body) ->
-        let (ctx, begin_label) = fresh_label ctx "loop_begin" in
-        let (ctx, end_label) = fresh_label ctx "loop_end" in
-        let (ctx, cond_asm, cond_reg) = gen_expr ctx cond in
-        
-        let loop_ctx = { ctx with 
-            loop_stack = (begin_label, end_label) :: ctx.loop_stack } in
+        let (ctx_before_cond_free, begin_label) = fresh_label ctx "loop_begin" in
+        let (ctx_before_body, end_label) = fresh_label ctx_before_cond_free "loop_end" in
+
+        let (ctx_after_cond_expr, cond_asm, cond_reg) = gen_expr ctx_before_body cond in
+
+        let loop_ctx = { ctx_after_cond_expr with
+            loop_stack = (begin_label, end_label) :: ctx_after_cond_expr.loop_stack } in
         let (ctx_after_body, body_asm) = gen_stmt loop_ctx body in
-        
+
         (* 仅弹出循环栈，保留其他字段 *)
-        let ctx_after_loop = { ctx_after_body with 
+        let ctx_after_loop = { ctx_after_body with
             loop_stack = List.tl ctx_after_body.loop_stack } in
-        
+
         let asm = Printf.sprintf "%s:" begin_label ^
                 cond_asm ^
                 Printf.sprintf "\n    beqz %s, %s" cond_reg end_label ^
@@ -348,23 +368,23 @@ and gen_stmt ctx stmt =
                 Printf.sprintf "\n    j %s" begin_label ^
                 Printf.sprintf "\n%s:" end_label in
         (free_temp_reg ctx_after_loop, asm)
-    
+
     | Break ->
         (match ctx.loop_stack with
-        | (_, end_label)::_ -> 
+        | (_, end_label)::_ ->
             (ctx, Printf.sprintf "    j %s" end_label)
         | [] -> failwith "break outside loop")
-    
+
     | Continue ->
         (match ctx.loop_stack with
-        | (begin_label, _)::_ -> 
+        | (begin_label, _)::_ ->
             (ctx, Printf.sprintf "    j %s" begin_label)
         | [] -> failwith "continue outside loop")
-    
+
   | Return expr_opt ->
-        let (ctx, expr_asm, _reg) = 
+        let (ctx, expr_asm, _reg) =
             match expr_opt with
-            | Some expr -> 
+            | Some expr ->
                 let (ctx, asm, r) = gen_expr ctx expr in
                 if r = "a0" then (ctx, asm, r)
                 else (ctx, asm ^ Printf.sprintf "\n    mv a0, %s" r, "a0")
@@ -374,10 +394,10 @@ and gen_stmt ctx stmt =
         let epilogue_asm = gen_epilogue ctx in
         (free_temp_reg ctx, expr_asm ^ "\n" ^ epilogue_asm)
     | EmptyStmt -> (ctx, "")
-    | ExprStmt e -> 
-        let (ctx, asm, _) = gen_expr ctx e in 
+    | ExprStmt e ->
+        let (ctx, asm, _) = gen_expr ctx e in
         (free_temp_reg ctx, asm)
-
+        
 (* 函数代码生成 *)
 let gen_function func =
     let ctx = create_context func.name in
