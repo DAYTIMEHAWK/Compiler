@@ -22,6 +22,7 @@ type context = {
     used_regs: string list;  (* 跟踪正在使用的寄存器 *)
     saved_area_size: int;
     max_local_offset: int;
+    exit_label: string;
 }
 
 (* 创建新上下文 *)
@@ -47,7 +48,9 @@ let create_context func_name =
       param_count = 0;
       used_regs = [];  (* 初始化为空列表 *)
       max_local_offset = 0; 
-      saved_area_size = 52 } (* 4(ra) + 12*4(regs) = 52 *)
+      saved_area_size = 52; (* 4(ra) + 12*4(regs) = 52 *)
+      exit_label = ""; (* <-- 初始化新增字段 *)
+    }
 
 (* 栈对齐常量 *)
 let stack_align = 16
@@ -112,29 +115,7 @@ let align_stack size align =
     if remainder = 0 then size else size + (align - remainder)
 
 (* 函数序言生成 *)
-let gen_prologue ctx func =
-    let estimated_locals = 
-        match func.name with
-        | "main" -> 500
-        | _ -> 200
-    in
-    let total_size = align_stack (ctx.saved_area_size + estimated_locals) stack_align in
-    let save_regs_asm = 
-        let save_instrs = 
-            List.mapi (fun i reg -> 
-                Printf.sprintf "    sw %s, %d(sp)" reg (i * 4)
-            ) ctx.saved_regs
-            @ [Printf.sprintf "    sw ra, %d(sp)" (List.length ctx.saved_regs * 4)]
-        in
-        String.concat "\n" save_instrs
-    in
-    let asm = Printf.sprintf "
-    .globl %s
-%s:
-    addi sp, sp, -%d
-%s
-" func.name func.name total_size save_regs_asm in
-    (asm, { ctx with frame_size = total_size })
+
 
 (* 函数结语生成 *)
 let gen_epilogue ctx =
@@ -154,6 +135,77 @@ let gen_epilogue ctx =
     addi sp, sp, %d
     ret
 " restore_regs_asm ctx.frame_size
+
+(* 帮助函数：为函数生成参数保存代码 *)
+let gen_save_params ctx func =
+    let rec gen_save params index asm =
+        match params with
+        | [] -> asm
+        | param::rest ->
+            let offset = get_var_offset ctx param in
+            if index < 8 then (
+                let reg = Printf.sprintf "a%d" index in
+                gen_save rest (index + 1)
+                    (asm ^ Printf.sprintf "    sw %s, %d(sp)\n" reg offset)
+            ) else (
+                let stack_offset = ctx.frame_size + (index - 8) * 4 in
+                let load_asm = Printf.sprintf "    lw t0, %d(sp)" stack_offset in
+                let store_asm = Printf.sprintf "    sw t0, %d(sp)" offset in
+                gen_save rest (index + 1)
+                    (asm ^ load_asm ^ "\n" ^ store_asm ^ "\n")
+            )
+    in
+    gen_save func.params 0 ""
+
+(* 函数代码生成 (重构版本) *)
+let gen_function func =
+    let base_ctx = create_context func.name in
+    let ctx_with_params =
+        List.fold_left (fun ctx param ->
+            add_var ctx param 4
+        ) base_ctx func.params
+    in
+    
+    let (ctx_for_body, exit_label) = fresh_label ctx_with_params "func_exit" in
+    let ctx_for_body = { ctx_for_body with exit_label = exit_label } in
+
+    let (final_ctx, body_asm) =
+        match func.body with
+        | Block stmts -> gen_stmts ctx_for_body stmts
+        | _ -> gen_stmt ctx_for_body func.body
+    in
+    
+    (* 根据函数体分析结果，计算真实的栈帧大小 *)
+    let spill_and_temp_space = 8000 in (* 为寄存器溢出和临时调用提供一个大的缓冲区 *)
+    let required_space = final_ctx.max_local_offset + spill_and_temp_space in
+    let total_size = align_stack (final_ctx.saved_area_size + required_space) stack_align in
+    
+    let final_ctx_with_frame = { final_ctx with frame_size = total_size } in
+    
+    let prologue_asm =
+        let save_regs_asm =
+            let reg_saves = List.mapi (fun i reg ->
+                Printf.sprintf "    sw %s, %d(sp)" reg (i * 4))
+                final_ctx_with_frame.saved_regs
+            in
+            let ra_save = Printf.sprintf "    sw ra, %d(sp)" (List.length final_ctx_with_frame.saved_regs * 4) in
+            String.concat "\n" (reg_saves @ [ra_save])
+        in
+        Printf.sprintf ".globl %s\n%s:\n    addi sp, sp, -%d\n%s"
+            func.name func.name total_size save_regs_asm
+    in
+    
+    let save_params_asm = gen_save_params final_ctx_with_frame func in
+    
+    let epilogue_asm = gen_epilogue final_ctx_with_frame in
+    
+    (* 组装最终代码 *)
+    prologue_asm ^ "\n" ^ 
+    save_params_asm ^ "\n" ^ 
+    body_asm ^ "\n" ^ 
+    exit_label ^ ":\n" ^ 
+    epilogue_asm
+
 
 (* 检查是否是溢出寄存器 *)
 let is_spill_reg reg = 
@@ -510,85 +562,21 @@ and gen_stmt ctx stmt =
                 let parts = [asm] @
                            (if load_asm = "" then [] else [load_asm]) in
                 let full_asm = String.concat "\n" (List.filter (fun s -> s <> "") parts) in
-                if actual_reg = "a0" then (ctx, full_asm, "a0")
-                else (ctx, full_asm ^ "\n" ^ Printf.sprintf "    mv a0, %s" actual_reg, "a0")
+                let move_asm = if actual_reg = "a0" then "" else Printf.sprintf "    mv a0, %s" actual_reg in
+                (ctx, full_asm ^ "\n" ^ move_asm, "a0")
             | None -> (ctx, "", "a0")
         in
-        let epilogue_asm = gen_epilogue ctx in
-        (free_temp_reg ctx reg, expr_asm ^ "\n" ^ epilogue_asm)
+        (* 修改点：不再生成结语，而是跳转到统一的出口标签 *)
+        let final_asm = expr_asm ^ "\n" ^ Printf.sprintf "    j %s" ctx.exit_label in
+        (free_temp_reg ctx reg, final_asm)
+
     | EmptyStmt -> (ctx, "")
     | ExprStmt e -> 
         let (ctx, asm, reg) = gen_expr ctx e in 
         (free_temp_reg ctx reg, asm)
 
 (* 函数代码生成 *)
-let gen_function func =
-    let ctx = create_context func.name in
-    let ctx =
-        List.fold_left (fun ctx param ->
-            add_var ctx param 4
-        ) ctx func.params
-    in
-    
-    let estimated_locals = 
-        match func.name with
-        | "main" -> 1000
-        | _ -> 400
-    in
-    
-    let total_size = align_stack (ctx.saved_area_size + estimated_locals) stack_align in
-    let ctx = { ctx with frame_size = total_size } in
-    
-    let prologue_asm =
-        let save_regs_asm =
-            let reg_saves = List.mapi (fun i reg ->
-                Printf.sprintf "    sw %s, %d(sp)" reg (i * 4))
-                ctx.saved_regs
-            in
-            let ra_save = Printf.sprintf "    sw ra, %d(sp)" (List.length ctx.saved_regs * 4) in
-            String.concat "\n" (reg_saves @ [ra_save])
-        in
-        Printf.sprintf ".globl %s\n%s:\n    addi sp, sp, -%d\n%s"
-            func.name func.name total_size save_regs_asm
-    in
-    
-    let save_params_asm =
-        let rec gen_save params index asm =
-            match params with
-            | [] -> asm
-            | param::rest ->
-                let offset = get_var_offset ctx param in
-                if index < 8 then (
-                    let reg = Printf.sprintf "a%d" index in
-                    gen_save rest (index + 1)
-                        (asm ^ Printf.sprintf "    sw %s, %d(sp)\n" reg offset)
-                ) else (
-                    (* 
-                     * 修复：参数9及以后位于调用者栈帧中，
-                     * 在被调用者的栈帧建立后，它们位于 sp + frame_size 的位置。
-                     * 第9个参数 (index=8) 在 sp + frame_size + 0
-                     * 第10个参数 (index=9) 在 sp + frame_size + 4
-                     * ...
-                     *)
-                    let stack_offset = ctx.frame_size + (index - 8) * 4 in
-                    let load_asm = Printf.sprintf "    lw t0, %d(sp)" stack_offset in
-                    let store_asm = Printf.sprintf "    sw t0, %d(sp)" offset in
-                    gen_save rest (index + 1)
-                        (asm ^ load_asm ^ "\n" ^ store_asm ^ "\n")
-                )
-        in
-        gen_save func.params 0 ""
-    in
-    
-    let (_, body_asm) =
-        match func.body with
-        | Block stmts -> gen_stmts ctx stmts
-        | _ -> gen_stmt ctx func.body
-    in
-    
-    let epilogue_asm = gen_epilogue ctx in
-    
-    prologue_asm ^ "\n" ^ save_params_asm ^ body_asm ^ epilogue_asm
+
     
 (* 编译单元代码生成 *)
 let compile cu =
