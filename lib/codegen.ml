@@ -556,7 +556,14 @@ let gen_function func =
                     gen_save rest (index + 1)
                         (asm ^ Printf.sprintf "    sw %s, %d(sp)\n" reg offset)
                 ) else (
-                    let stack_offset = ctx.frame_size + 28 + (index - 8) * 4 in
+                    (* 
+                     * 修复：参数9及以后位于调用者栈帧中，
+                     * 在被调用者的栈帧建立后，它们位于 sp + frame_size 的位置。
+                     * 第9个参数 (index=8) 在 sp + frame_size + 0
+                     * 第10个参数 (index=9) 在 sp + frame_size + 4
+                     * ...
+                     *)
+                    let stack_offset = ctx.frame_size + (index - 8) * 4 in
                     let load_asm = Printf.sprintf "    lw t0, %d(sp)" stack_offset in
                     let store_asm = Printf.sprintf "    sw t0, %d(sp)" offset in
                     gen_save rest (index + 1)
