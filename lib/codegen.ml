@@ -85,6 +85,17 @@ let add_var ctx name size =
       }
   | [] -> failwith "No active scope"
 
+(* 检查是否是溢出寄存器 *)
+let is_spill_reg reg =
+    String.length reg > 5 && String.sub reg 0 5 = "SPILL"
+
+(* 获取溢出寄存器的栈偏移量 *)
+let get_spill_offset reg =
+    if is_spill_reg reg then
+        int_of_string (String.sub reg 6 (String.length reg - 6))
+    else
+        failwith (Printf.sprintf "Not a spill register: %s" reg)
+
 (* 改进的寄存器分配函数 *)
 let alloc_temp_reg ctx =
     let temp_regs = ["t0"; "t1"; "t2"; "t3"; "t4"; "t5"; "t6"] in
@@ -137,16 +148,6 @@ let gen_epilogue ctx =
     ret
 " restore_regs_asm ctx.frame_size
 
-(* 检查是否是溢出寄存器 *)
-let is_spill_reg reg =
-    String.length reg > 5 && String.sub reg 0 5 = "SPILL"
-
-(* 获取溢出寄存器的栈偏移量 *)
-let get_spill_offset reg =
-    if is_spill_reg reg then
-        int_of_string (String.sub reg 6 (String.length reg - 6))
-    else
-        failwith (Printf.sprintf "Not a spill register: %s" reg)
 
 (* 生成加载溢出寄存器的代码 *)
 let gen_load_spill reg temp_reg =
