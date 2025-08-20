@@ -85,17 +85,6 @@ let add_var ctx name size =
       }
   | [] -> failwith "No active scope"
 
-(* 检查是否是溢出寄存器 *)
-let is_spill_reg reg =
-    String.length reg > 5 && String.sub reg 0 5 = "SPILL"
-
-(* 获取溢出寄存器的栈偏移量 *)
-let get_spill_offset reg =
-    if is_spill_reg reg then
-        int_of_string (String.sub reg 6 (String.length reg - 6))
-    else
-        failwith (Printf.sprintf "Not a spill register: %s" reg)
-
 (* 改进的寄存器分配函数 *)
 let alloc_temp_reg ctx =
     let temp_regs = ["t0"; "t1"; "t2"; "t3"; "t4"; "t5"; "t6"] in
@@ -131,10 +120,10 @@ let align_stack size align =
 (* 函数结语生成 *)
 let gen_epilogue ctx =
     let restore_regs_asm =
-        let ra_offset = (List.length ctx.saved_regs) * 4 in (* ra is saved after all s-regs *)
+        let ra_offset = (List.length ctx.saved_regs) * 4 in (* ra is saved at 48(sp) *)
         let ra_restore = Printf.sprintf "    lw ra, %d(sp)" ra_offset in
         let s_regs_restore =
-            List.rev ctx.saved_regs (* Restore in reverse order of saving, s11 first, then s10...s0 *)
+            ctx.saved_regs (* Corrected: Iterate directly, no List.rev *)
             |> List.mapi (fun i reg ->
                 let offset = i * 4 in (* s0 at 0, s1 at 4, ..., s11 at 44 *)
                 Printf.sprintf "    lw %s, %d(sp)" reg offset)
@@ -148,6 +137,16 @@ let gen_epilogue ctx =
     ret
 " restore_regs_asm ctx.frame_size
 
+(* 检查是否是溢出寄存器 *)
+let is_spill_reg reg =
+    String.length reg > 5 && String.sub reg 0 5 = "SPILL"
+
+(* 获取溢出寄存器的栈偏移量 *)
+let get_spill_offset reg =
+    if is_spill_reg reg then
+        int_of_string (String.sub reg 6 (String.length reg - 6))
+    else
+        failwith (Printf.sprintf "Not a spill register: %s" reg)
 
 (* 生成加载溢出寄存器的代码 *)
 let gen_load_spill reg temp_reg =
